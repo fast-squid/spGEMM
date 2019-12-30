@@ -8,7 +8,8 @@ extern "C" {
 #include "cm.h"
 
 cm cudaCOO2CM(coo mat);
-void cudaInitGEMM(cm A, cm B);
+cm cudaInitGEMM(cm A, cm B);
+void cudaGEMM(cm A, cm B, cm C);
 //void test(cm A, cm B);
 #ifdef __cplusplus
 }

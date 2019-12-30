@@ -4,18 +4,18 @@
 #include "../lib/cm.h"
 
 
-void initCM( cm* mat )
+void cmInit( cm* mat )
 {
 	mat->ptr = NULL;
 	mat->idx = NULL;
 	mat->val = NULL;
 	mat->nnz = 0;
-	mat->row_size = 0;
-    mat->col_size = 0;
+	mat->num_cols = 0;
+    mat->num_rows = 0;
     mat->type = ROW_MAJOR;
 }
 
-void freeCSR(cm* mat)
+void cmFree(cm* mat)
 {
     free( mat->ptr );
     free( mat->idx );
@@ -25,16 +25,42 @@ void freeCSR(cm* mat)
  	mat->val = NULL;
 
 	mat->nnz = 0;
-	mat->row_size = 0;
-    mat->col_size = 0;
+	mat->num_cols = 0;
+    mat->num_rows = 0;
     mat->type = ROW_MAJOR;
 }
 
 
-void setCMtype(cm* mat,bool type)
+int cmGetNumRows(cm mat)
+{
+    return mat.num_rows;
+}
+int cmGetNumCols(cm mat)
+{
+    return mat.num_cols;
+}
+int cmGetNNZ(cm mat)
+{
+    return mat.nnz;
+}
+
+void cmSetNumRows(cm* mat, int num_rows)
+{
+    mat->num_rows = num_rows;
+}
+void cmSetNumCols(cm* mat, int num_cols)
+{
+    mat->num_cols = num_cols;
+}
+void cmSetNNZ(cm* mat, int nnz)
+{
+    mat->nnz = nnz;
+}
+void cmSetType(cm* mat,bool type)
 {
     mat->type = type;
 }
+
 
 void printCM(cm mat)
 {
@@ -42,12 +68,12 @@ void printCM(cm mat)
     int inner_iter_size;
 
     if(mat.type == ROW_MAJOR){
-        outer_iter_size = mat.row_size;
-        printf("CSR %d %d %d\n",mat.row_size,mat.col_size,mat.nnz);
+        outer_iter_size = mat.num_cols;
+        printf("CSR %d %d %d\n",mat.num_cols,mat.num_rows,mat.nnz);
     }
     else{
-        outer_iter_size = mat.col_size;
-        printf("CSC %d %d %d\n",mat.row_size,mat.col_size,mat.nnz);
+        outer_iter_size = mat.num_rows;
+        printf("CSC %d %d %d\n",mat.num_cols,mat.num_rows,mat.nnz);
     }
 
     int cnt = 0;

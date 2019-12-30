@@ -14,30 +14,31 @@ int main(int argc, char *argv[]){
     cudaMalloc((void**)&init,sizeof(int)); 
 
     for(int tc =0;tc<ITER;tc++){
-        coo A,B;
-        initCOO(&A);    
-        initCOO(&B);    
-        setCOOtype(&A,COL_MAJOR);
-        setCOOtype(&B,ROW_MAJOR);
+        coo t_A,t_B;
+        initCOO(&t_A);    
+        initCOO(&t_B);    
+        setCOOtype(&t_A,COL_MAJOR);
+        setCOOtype(&t_B,ROW_MAJOR);
         
-        readMTX(&A, argv[1]);  
-        readMTX(&B, argv[1]);
+        readMTX(&t_A, argv[1]);  
+        readMTX(&t_B, argv[1]);
         
         printf("sorting A..\n");
-        sortCOO(A);
+        sortCOO(t_A);
         printf("sorting B..\n");
-        sortCOO(B);
+        sortCOO(t_B);
        
-        cm csc = cudaCOO2CM(A);
-        cm csr = cudaCOO2CM(B);
+        cm A = cudaCOO2CM(t_A);
+        cm B = cudaCOO2CM(t_B);
+        
 //        printCM(csc);
 //        printCM(csr);
-        cudaInitGEMM(csc,csr);
+        cm C = cudaInitGEMM(A,B);
+        cudaGEMM(A,B,C);
         //test(csc, csr);
         
-        freeCOO(&A);
-        freeCOO(&B);
-        return 0;
+        freeCOO(&t_A);
+        freeCOO(&t_B);
     }
     
    	return 0;

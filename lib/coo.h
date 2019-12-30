@@ -26,8 +26,8 @@ struct coo
 	triplet* data;
 
 	int nnz;
-	int row_size;
-    int col_size;
+	int num_cols;
+    int num_rows;
     bool type;
 };
 typedef struct coo coo;
