@@ -202,7 +202,7 @@ __global__ void inspectGEMM(
         int b_len = b_ptr[idx+1] - b_ptr[idx];
         int workload = a_len * b_len;
 
-        if(workload > c_nnz/a_num_cols*30)
+        if(workload > c_nnz/a_num_cols*50)
         {
             atomicAdd(&counter[0],1);
         }
@@ -233,7 +233,7 @@ __global__ void categorizeGEMM(
         int b_len = b_ptr[idx+1] - b_ptr[idx];
         int workload = a_len * b_len;
 
-        if(workload > c_nnz/a_num_cols*30)
+        if(workload > c_nnz/a_num_cols*50)
         {
             int loc = atomicAdd(&counter[0],1);
             bin[loc] = idx;
@@ -256,7 +256,7 @@ __global__ void categorizeGEMM(
     }
 }
 
-
+int* t_counter;
 int* counter;
 int* bin;
 #define NUM_BINS 8
@@ -268,24 +268,68 @@ void cudaCategorizeGEMM(cm A, cm B)
 
     inspectGEMM<<< cmGetNumCols(A)/32+1, 32 >>>
         (a_ptr, b_ptr, counter);
-    int* t_counter=new int[9];
+    
+    t_counter=new int[9];
 
     cudaMemcpy(&t_counter[1], counter, sizeof(int)*NUM_BINS,cudaMemcpyDeviceToHost);
+
     t_counter[0] = 0;
     for(int i=0; i < 8;i++)
     {
         t_counter[i+1] += t_counter[i];
-        printf("%d\n",t_counter[i]);
     }
+    
     cudaMemcpy(counter, t_counter, sizeof(int)*(NUM_BINS+1),cudaMemcpyHostToDevice);
     categorizeGEMM<<< cmGetNumCols(A)/32+1, 32>>>
         (a_ptr, b_ptr, counter, bin);
+    ERROR_CHECK;
+}
+
+__global__ void binGEMM(
+        int* a_ptr, int* a_idx, float*a_val,
+        int* b_ptr, int* b_idx, float*b_val,
+        int* c_ptr_base, int* c_ptr_nnz, int* c_idx, float* c_val,
+        int* bin)
+{
+    __shared__ int offset;
+    int idx = bin[blockIdx.x];
+
+    int b_curr = b_ptr[idx];
+    int b_next = b_ptr[idx+1];
+    for(int ai = a_ptr[idx]; ai < a_ptr[idx+1]; ai++)
+    {
+        int row = a_idx[ai];
+        int base = c_ptr_base[row];
+        if(threadIdx.x==0)
+            offset = atomicAdd(&c_ptr_nnz[row], b_next-b_curr);
+        __syncthreads();
+        for(int bi = threadIdx.x; bi < b_next - b_curr; bi+=blockDim.x)
+        {
+            c_val[base+offset+bi] = a_val[ai]*b_val[b_curr+bi];
+            c_idx[base+offset+bi] = b_idx[b_curr+bi];
+        }
+    }
+}
+
+void cudaBinGEMM(cm A, cm B, cm C)
+{    
+    for(int i=0;i<NUM_BINS;i++){
+        int num_blocks = t_counter[i+1] - t_counter[i];
+        if(num_blocks)
+        binGEMM<<<t_counter[i+1] - t_counter[i], 32 >>>
+            (a_ptr, a_idx, a_val,
+             b_ptr, b_idx, b_val,
+             c_ptr_base, c_ptr_nnz , c_idx, c_val,
+             &bin[t_counter[i]]);
+    }
+    cudaDeviceSynchronize();
+    ERROR_CHECK;
 }
 
 
 
 
-__global__ void simpleGEMM(
+__global__ void simpleGEMM(/*{{{*/
         int* a_ptr, int* a_idx, float*a_val,
         int* b_ptr, int* b_idx, float*b_val,
         int*c_ptr_base, int* c_ptr_nnz, int* c_idx, float* c_val)
@@ -317,29 +361,8 @@ void cudaSimpleGEMM(cm A, cm B, cm C)
          b_ptr, b_idx, b_val,
          c_ptr_base, c_ptr_nnz , c_idx, c_val);
     cudaDeviceSynchronize();
-
-///*{{{*/
-//    int *t_ptr_base = new int[cmGetNumRows(C)+1];
-//    int *t_ptr_nnz = new int[cmGetNumRows(C)];
-//    int *t_idx = new int[cmGetNNZ(C)];
-//    float *t_val = new float[cmGetNNZ(C)];
-//
-//    cudaMemcpy(t_ptr_base, c_ptr_base, sizeof(int)*(cmGetNumRows(C)+1),cudaMemcpyDeviceToHost);
-//    cudaMemcpy(t_ptr_nnz, c_ptr_nnz, sizeof(int)*(cmGetNumRows(C)),cudaMemcpyDeviceToHost);
-//    cudaMemcpy(t_idx, c_idx, sizeof(int)*cmGetNNZ(C),cudaMemcpyDeviceToHost);
-//    cudaMemcpy(t_val, c_val, sizeof(float)*cmGetNNZ(C),cudaMemcpyDeviceToHost);
-//    printf("rows : %d %d\n",cmGetNumRows(C), cmGetNNZ(C));
-//     for(int i = 0; i < cmGetNumRows(C); i++)
-//    {
-//        int base = t_ptr_base[i];    
-//        for(int j = 0; j < t_ptr_nnz[i]; j++)
-//        {
-//            printf("(%d %d %f)\n",i,t_idx[base+j], t_val[base+j]);    
-//        }
-//    }
-///*}}}*/
 }
-
+/*}}}*/
 __global__ void mergeGEMM(/*{{{*/
         int* c_ptr_base, int* c_ptr_nnz, int* c_idx, float* c_val,
         int* c_idx_dummy,int* dense
