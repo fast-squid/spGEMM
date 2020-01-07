@@ -1,0 +1,5 @@
+========= CUDA-MEMCHECK
+========= Error: process didn't terminate successfully
+=========        The application may have hit an error when dereferencing Unified Memory from the host. Please rerun the application under cuda-gdb or Nsight Eclipse Edition to catch host side errors.
+========= Internal error (20)
+========= No CUDA-MEMCHECK results found

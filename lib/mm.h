@@ -7,9 +7,20 @@ extern "C" {
 #include "coo.h"
 #include "cm.h"
 
+struct DenseChunk
+{
+    int idx;
+    float val[64];
+};
+typedef struct DenseChunk dc;
+
 cm cudaCOO2CM(coo mat);
 cm cudaInitGEMM(cm A, cm B);
-void cudaGEMM(cm A, cm B, cm C);
+void cudaSimpleGEMM(cm A, cm B, cm C);
+void cudaDCGEMM(cm A, cm B, cm C);
+//void cudaMergeGEMM(cm A, cm B, cm C);
+void cudaMergeGEMM(cm C);
+
 //void test(cm A, cm B);
 #ifdef __cplusplus
 }

@@ -21,7 +21,7 @@ int main(int argc, char *argv[]){
         setCOOtype(&t_B,ROW_MAJOR);
         
         readMTX(&t_A, argv[1]);  
-        readMTX(&t_B, argv[1]);
+        readMTX(&t_B, argv[2]);
         
         printf("sorting A..\n");
         sortCOO(t_A);
@@ -30,11 +30,10 @@ int main(int argc, char *argv[]){
        
         cm A = cudaCOO2CM(t_A);
         cm B = cudaCOO2CM(t_B);
-        
-//        printCM(csc);
-//        printCM(csr);
         cm C = cudaInitGEMM(A,B);
-        cudaGEMM(A,B,C);
+
+        cudaSimpleGEMM(A,B,C);
+        cudaMergeGEMM(C);
         //test(csc, csr);
         
         freeCOO(&t_A);
