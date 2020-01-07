@@ -31,7 +31,7 @@ int main(int argc, char *argv[]){
         cm A = cudaCOO2CM(t_A);
         cm B = cudaCOO2CM(t_B);
         cm C = cudaInitGEMM(A,B);
-
+        cudaCategorizeGEMM(A,B);
         cudaSimpleGEMM(A,B,C);
         cudaMergeGEMM(C);
         //test(csc, csr);

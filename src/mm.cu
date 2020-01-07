@@ -2,7 +2,7 @@
 #include "../lib/coo.h"
 #include "../lib/cm.h"
 #include "../lib/mm.h"
-
+/*{{{*/
 #define ERROR_CHECK \
 {\
 	cudaError err = cudaGetLastError(); \
@@ -12,6 +12,7 @@
 		exit(-1); \
 	}\
 }
+/*}}}*/
 
 #define DENSE_NUM 1000
 
@@ -36,7 +37,7 @@ __device__ int a_num_cols, a_num_rows;
 __device__ bool a_type;
 __device__ int b_num_cols, b_num_rows;
 __device__ bool b_type;
-__device__ int c_num_cols, c_num_rows;
+__device__ int c_num_cols, c_num_rows, c_nnz;
 __device__ bool c_type;
 
 __global__ void coo2cm(/*{{{*/
@@ -146,7 +147,7 @@ __global__ void initGEMM(
     }
 }
 
-cm cudaInitGEMM(cm A, cm B)
+cm cudaInitGEMM(cm A, cm B)/*{{{*/
 {
     cm C;
     cmSetType(&C, ROW_MAJOR);
@@ -157,7 +158,7 @@ cm cudaInitGEMM(cm A, cm B)
     cudaMemcpyToSymbol(a_num_rows, &A.num_rows, sizeof(int),0 ,cudaMemcpyHostToDevice);
     cudaMemcpyToSymbol(b_num_cols, &B.num_cols, sizeof(int),0 ,cudaMemcpyHostToDevice);
     cudaMemcpyToSymbol(b_num_rows, &B.num_rows, sizeof(int),0 ,cudaMemcpyHostToDevice);
-     cudaMemcpyToSymbol(c_num_cols, &C.num_cols, sizeof(int),0 ,cudaMemcpyHostToDevice);
+    cudaMemcpyToSymbol(c_num_cols, &C.num_cols, sizeof(int),0 ,cudaMemcpyHostToDevice);
     cudaMemcpyToSymbol(c_num_rows, &C.num_rows, sizeof(int),0 ,cudaMemcpyHostToDevice);
 
     cudaMalloc((void**)&c_ptr_base,sizeof(int)*(cmGetNumRows(C)+1));
@@ -182,12 +183,106 @@ cm cudaInitGEMM(cm A, cm B)
     cudaMalloc((void**)&c_idx, sizeof(int)*cmGetNNZ(C));
     cudaMalloc((void**)&c_val, sizeof(float)*cmGetNNZ(C));
     cudaMemcpy(c_ptr_base, temp,sizeof(int)*(cmGetNumRows(C)+1), cudaMemcpyHostToDevice);
+    cudaMemcpyToSymbol(c_nnz, &C.nnz, sizeof(int),0 ,cudaMemcpyHostToDevice);
+
     cudaMemset(c_ptr_nnz, 0, sizeof(int)*cmGetNumRows(C));
 	cudaDeviceSynchronize();
 
     delete temp;
     return C;
 }
+/*}}}*/
+
+__global__ void inspectGEMM(
+        int* a_ptr, int* b_ptr, int* counter)
+{
+    int idx = threadIdx.x + blockIdx.x*blockDim.x;
+    if(idx <= a_num_cols){
+        int a_len = a_ptr[idx+1] - a_ptr[idx];
+        int b_len = b_ptr[idx+1] - b_ptr[idx];
+        int workload = a_len * b_len;
+
+        if(workload > c_nnz/a_num_cols*30)
+        {
+            atomicAdd(&counter[0],1);
+        }
+        else
+        {
+            int left = 1;
+            int right = 2;
+            for(int i=0;i<7;i++)
+            {
+                if(left<= b_len && b_len<right)
+                {
+                    atomicAdd(&counter[i+1],1);
+                }
+                left<<=1; 
+                right<<=1;
+            }
+        }
+    }
+}
+
+__global__ void categorizeGEMM(
+        int* a_ptr, int* b_ptr, 
+        int* counter, int* bin)
+{
+    int idx = threadIdx.x + blockIdx.x*blockDim.x;
+    if(idx<a_num_cols){
+        int a_len = a_ptr[idx+1] - a_ptr[idx];
+        int b_len = b_ptr[idx+1] - b_ptr[idx];
+        int workload = a_len * b_len;
+
+        if(workload > c_nnz/a_num_cols*30)
+        {
+            int loc = atomicAdd(&counter[0],1);
+            bin[loc] = idx;
+        }
+        else
+        {
+            int left = 1;
+            int right = 2;
+            for(int i=0;i<7;i++)
+            {
+                if(left<= b_len && b_len<right)
+                {
+                    int loc = atomicAdd(&counter[i+1],1);
+                    bin[loc] = idx;
+                }
+                left<<=1; 
+                right<<=1;
+            }
+        }
+    }
+}
+
+
+int* counter;
+int* bin;
+#define NUM_BINS 8
+void cudaCategorizeGEMM(cm A, cm B)
+{
+    cudaMalloc((void**)&counter, sizeof(int)*(NUM_BINS+1));
+    cudaMalloc((void**)&bin, sizeof(int)*cmGetNumCols(A));
+    cudaMemset(counter, 0, sizeof(int)*NUM_BINS);
+
+    inspectGEMM<<< cmGetNumCols(A)/32+1, 32 >>>
+        (a_ptr, b_ptr, counter);
+    int* t_counter=new int[9];
+
+    cudaMemcpy(&t_counter[1], counter, sizeof(int)*NUM_BINS,cudaMemcpyDeviceToHost);
+    t_counter[0] = 0;
+    for(int i=0; i < 8;i++)
+    {
+        t_counter[i+1] += t_counter[i];
+        printf("%d\n",t_counter[i]);
+    }
+    cudaMemcpy(counter, t_counter, sizeof(int)*(NUM_BINS+1),cudaMemcpyHostToDevice);
+    categorizeGEMM<<< cmGetNumCols(A)/32+1, 32>>>
+        (a_ptr, b_ptr, counter, bin);
+}
+
+
 
 
 __global__ void simpleGEMM(
