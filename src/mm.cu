@@ -16,6 +16,9 @@
 
 #define DENSE_NUM 1000
 
+int* match;
+int* num_splits;
+
 int* a_ptr;
 int* a_idx;
 float* a_val;
@@ -193,11 +196,11 @@ cm cudaInitGEMM(cm A, cm B)/*{{{*/
 }
 /*}}}*/
 
-__global__ void inspectGEMM(
+__global__ void inspectGEMM(/*{{{*/
         int* a_ptr, int* b_ptr, int* counter)
 {
     int idx = threadIdx.x + blockIdx.x*blockDim.x;
-    if(idx <= a_num_cols){
+    if(idx < a_num_cols){
         int a_len = a_ptr[idx+1] - a_ptr[idx];
         int b_len = b_ptr[idx+1] - b_ptr[idx];
         int workload = a_len * b_len;
@@ -210,14 +213,20 @@ __global__ void inspectGEMM(
         {
             int left = 1;
             int right = 2;
-            for(int i=0;i<7;i++)
+            bool flag = 0;
+            for(int i=1;i<8;i++)
             {
                 if(left<= b_len && b_len<right)
                 {
-                    atomicAdd(&counter[i+1],1);
+                    flag = 1;
+                    atomicAdd(&counter[i],1);
                 }
                 left<<=1; 
                 right<<=1;
+            }
+            if(!flag)
+            {
+                atomicAdd(&counter[8],1);
             }
         }
     }
@@ -242,16 +251,24 @@ __global__ void categorizeGEMM(
         {
             int left = 1;
             int right = 2;
-            for(int i=0;i<7;i++)
+            bool flag = 0;
+            for(int i=1;i<8;i++)
             {
                 if(left<= b_len && b_len<right)
                 {
-                    int loc = atomicAdd(&counter[i+1],1);
+                    int loc = atomicAdd(&counter[i],1);
+                    flag = 1;
                     bin[loc] = idx;
                 }
                 left<<=1; 
                 right<<=1;
             }
+            if(!flag)
+            {
+                int loc = atomicAdd(&counter[8],1);
+                bin[loc] = idx;
+            }
+
         }
     }
 }
@@ -259,22 +276,22 @@ __global__ void categorizeGEMM(
 int* t_counter;
 int* counter;
 int* bin;
-#define NUM_BINS 8
+#define NUM_BINS 9
 void cudaCategorizeGEMM(cm A, cm B)
 {
     cudaMalloc((void**)&counter, sizeof(int)*(NUM_BINS+1));
     cudaMalloc((void**)&bin, sizeof(int)*cmGetNumCols(A));
-    cudaMemset(counter, 0, sizeof(int)*NUM_BINS);
+    cudaMemset(counter, 0, sizeof(int)*(NUM_BINS+1));
 
     inspectGEMM<<< cmGetNumCols(A)/32+1, 32 >>>
         (a_ptr, b_ptr, counter);
     
-    t_counter=new int[9];
+    t_counter=new int[10];
 
     cudaMemcpy(&t_counter[1], counter, sizeof(int)*NUM_BINS,cudaMemcpyDeviceToHost);
 
     t_counter[0] = 0;
-    for(int i=0; i < 8;i++)
+    for(int i=0; i < 9;i++)
     {
         t_counter[i+1] += t_counter[i];
     }
@@ -283,7 +300,76 @@ void cudaCategorizeGEMM(cm A, cm B)
     categorizeGEMM<<< cmGetNumCols(A)/32+1, 32>>>
         (a_ptr, b_ptr, counter, bin);
     ERROR_CHECK;
+}/*}}}*/
+
+#define WIDTH 4/*{{{*/
+__global__ void splitGEMM(
+    int* a_ptr, int* a_idx, float* a_val,
+    int* b_ptr, int* b_idx, float* b_val,
+    int* c_ptr_base, int* c_ptr_nnz, int* c_idx, float* c_val,
+    int* match, int* num_splits,
+    int*bin)
+{
+    __shared__ int offset;
+    int idx = match[blockIdx.x];
+    int bid = blockIdx.x - num_splits[blockIdx.x];
+
+    int b_curr = b_ptr[idx];
+    int b_next = b_ptr[idx+1];
+    for(int ai = a_ptr[idx]+bid*WIDTH; ai < a_ptr[idx+1] && ai< a_ptr[idx] + (bid+1)*WIDTH; ai++)
+    {
+        int row = a_idx[ai];
+        int base = c_ptr_base[row];
+        if(threadIdx.x==0)
+            offset = atomicAdd(&c_ptr_nnz[row], b_next-b_curr);
+        __syncthreads();
+        for(int bi = threadIdx.x; bi < b_next - b_curr; bi+=blockDim.x)
+        {
+            c_val[base+offset+bi] = a_val[ai]*b_val[b_curr+bi];
+            c_idx[base+offset+bi] = b_idx[b_curr+bi];
+        }
+    }
 }
+
+void cudaSplitGEMM(cm A, cm B, cm C)
+{   
+
+    int orig = t_counter[1] - t_counter[0];
+    int* t_bin = new int[orig];
+    int* t_match = new int[cmGetNumRows(A)];
+    int* t_num_splits = new int[cmGetNumRows(A)];
+
+    cudaMemcpy(t_bin, bin, sizeof(int)*orig,cudaMemcpyDeviceToHost);
+    int num_blocks = 0;
+    int prev=0;
+    for(int i=0;i<orig;i++)
+    {
+        int idx = t_bin[i];
+        int len =  A.ptr[idx+1] - A.ptr[idx];
+        int q = len / WIDTH;
+        int r = len % WIDTH;
+        int split = r?q+1:q;
+
+        for(int j=0;j<split;j++)
+        {
+            t_num_splits[num_blocks] = prev;
+            t_match[num_blocks++] = idx;
+        }
+        prev += split;
+    }
+    cudaMalloc((void**)&match, sizeof(int)*num_blocks);
+    cudaMalloc((void**)&num_splits, sizeof(int)*num_blocks);
+    cudaMemcpy(match, t_match, sizeof(int)*num_blocks,cudaMemcpyHostToDevice);
+    cudaMemcpy(num_splits, t_num_splits, sizeof(int)*num_blocks,cudaMemcpyHostToDevice);
+    splitGEMM<<<num_blocks, 32 >>>
+            (a_ptr, a_idx, a_val,
+             b_ptr, b_idx, b_val,
+             c_ptr_base, c_ptr_nnz , c_idx, c_val,
+             match, num_splits,
+             &bin[t_counter[0]]);
+
+}
+/*}}}*/
 
 __global__ void binGEMM(
         int* a_ptr, int* a_idx, float*a_val,
@@ -313,10 +399,10 @@ __global__ void binGEMM(
 
 void cudaBinGEMM(cm A, cm B, cm C)
 {    
-    for(int i=0;i<NUM_BINS;i++){
+    for(int i=1;i<NUM_BINS;i++){
         int num_blocks = t_counter[i+1] - t_counter[i];
         if(num_blocks)
-        binGEMM<<<t_counter[i+1] - t_counter[i], 32 >>>
+        binGEMM<<<num_blocks, 128 >>>
             (a_ptr, a_idx, a_val,
              b_ptr, b_idx, b_val,
              c_ptr_base, c_ptr_nnz , c_idx, c_val,

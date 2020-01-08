@@ -32,6 +32,7 @@ int main(int argc, char *argv[]){
         cm B = cudaCOO2CM(t_B);
         cm C = cudaInitGEMM(A,B);
         cudaCategorizeGEMM(A,B);
+        cudaSplitGEMM(A,B,C);
         cudaBinGEMM(A,B,C);
         //cudaSimpleGEMM(A,B,C);
         cudaMergeGEMM(C);
