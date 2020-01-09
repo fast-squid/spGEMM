@@ -27,13 +27,20 @@ int main(int argc, char *argv[]){
         sortCOO(t_A);
         printf("sorting B..\n");
         sortCOO(t_B);
-       
+/*       
+        printf("%d %d\n",t_A.nnz, t_B.nnz);        
+        for(int i=0;i<t_A.nnz;i++)
+        {
+            printf("%d %d\n",t_A.data[i].ridx, t_A.data[i].cidx);
+        }
+*/
         cm A = cudaCOO2CM(t_A);
         cm B = cudaCOO2CM(t_B);
         cm C = cudaInitGEMM(A,B);
         cudaCategorizeGEMM(A,B);
         cudaSplitGEMM(A,B,C);
-        cudaBinGEMM(A,B,C);
+        cudaGatherGEMM(A,B,C);
+        //cudaBinGEMM(A,B,C);
         //cudaSimpleGEMM(A,B,C);
         cudaMergeGEMM(C);
         //test(csc, csr);

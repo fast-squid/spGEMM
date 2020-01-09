@@ -14,7 +14,7 @@
 }
 /*}}}*/
 
-#define DENSE_NUM 1000
+#define DENSE_NUM 1024
 
 int* match;
 int* num_splits;
@@ -166,15 +166,19 @@ cm cudaInitGEMM(cm A, cm B)/*{{{*/
 
     cudaMalloc((void**)&c_ptr_base,sizeof(int)*(cmGetNumRows(C)+1));
     cudaMalloc((void**)&c_ptr_nnz,sizeof(int)*cmGetNumRows(C));
+    cudaMemset(c_ptr_base, 0, sizeof(int)*(cmGetNumRows(C)+1));
     ERROR_CHECK;
     initGEMM<<< A.num_cols, 32 >>>
         (a_ptr, a_idx,
          b_ptr, b_idx,
          c_ptr_base);
 	cudaDeviceSynchronize();
+    ERROR_CHECK;
 
     int *temp = new int[cmGetNumRows(C)+1];
     cudaMemcpy(temp, c_ptr_base, sizeof(int)*(cmGetNumRows(C)+1), cudaMemcpyDeviceToHost);
+    printf("%d %d %d\n",cmGetNumRows(A), cmGetNumCols(A), cmGetNNZ(A));
+    printf("%d %d %d\n",cmGetNumRows(B), cmGetNumCols(B), cmGetNNZ(B));
 
     for(int i=0;i<A.num_rows;i++)
     {
@@ -367,17 +371,82 @@ void cudaSplitGEMM(cm A, cm B, cm C)
              c_ptr_base, c_ptr_nnz , c_idx, c_val,
              match, num_splits,
              &bin[t_counter[0]]);
+    ERROR_CHECK;
 
 }
 /*}}}*/
 
-__global__ void binGEMM(
+__global__ void GatherGEMM(
+        int* a_ptr, int* a_idx, float*a_val,
+        int* b_ptr, int* b_idx, float*b_val,
+        int* c_ptr_base, int* c_ptr_nnz, int* c_idx, float* c_val,
+        int* bin, int *factor)
+{
+    int tid = threadIdx.x;
+    int bid = blockIdx.x;
+
+    int newBid = 0;
+    int newTid = tid;
+    
+    bid *= factor[0]; 
+    newBid = tid / (blockDim.x/factor[0]);
+    newTid = tid - (blockDim.x/factor[0])*newBid;
+
+    int idx = bin[bid+newBid];
+
+    int b_curr = b_ptr[idx];
+    int b_next = b_ptr[idx+1];
+
+    __shared__ int offset[128];
+    for(int ai = a_ptr[idx]; ai < a_ptr[idx+1]; ai++)
+    {
+        int row = a_idx[ai];
+        int base = c_ptr_base[row];
+
+        if(newTid==0)
+            offset[newBid] = atomicAdd(&c_ptr_nnz[row], b_next-b_curr);
+        __syncthreads();
+
+        for(int bi = newTid; bi < b_next - b_curr; bi+=blockDim.x/factor[0])
+        {
+            c_val[base+offset[newBid]+bi] = a_val[ai]*b_val[b_curr+bi];
+            c_idx[base+offset[newBid]+bi] = b_idx[b_curr+bi];
+        }
+    }
+}
+
+void cudaGatherGEMM(cm A, cm B, cm C)
+{  
+    int* factor;
+    int t_factor[10] = {128,64,32,16,8,4,2,1,1,1};
+
+    cudaMalloc((void**)&factor, sizeof(int)*10);
+    cudaMemcpy(factor, t_factor, sizeof(int)*10,cudaMemcpyHostToDevice);
+
+    for(int i=1;i<NUM_BINS;i++){
+        int num_blocks = t_counter[i+1] - t_counter[i];
+        if(num_blocks){
+            GatherGEMM<<<num_blocks/t_factor[i-1]+1,512 >>>
+                (a_ptr, a_idx, a_val,
+                 b_ptr, b_idx, b_val,
+                 c_ptr_base, c_ptr_nnz , c_idx, c_val,
+                 &bin[t_counter[i]],&factor[i-1]);
+            printf("%d\n",i);
+        }
+        ERROR_CHECK;
+    }
+    cudaDeviceSynchronize();
+}
+
+
+__global__ void binGEMM(/*{{{*/
         int* a_ptr, int* a_idx, float*a_val,
         int* b_ptr, int* b_idx, float*b_val,
         int* c_ptr_base, int* c_ptr_nnz, int* c_idx, float* c_val,
         int* bin)
 {
     __shared__ int offset;
+
     int idx = bin[blockIdx.x];
 
     int b_curr = b_ptr[idx];
@@ -386,9 +455,11 @@ __global__ void binGEMM(
     {
         int row = a_idx[ai];
         int base = c_ptr_base[row];
+
         if(threadIdx.x==0)
             offset = atomicAdd(&c_ptr_nnz[row], b_next-b_curr);
         __syncthreads();
+
         for(int bi = threadIdx.x; bi < b_next - b_curr; bi+=blockDim.x)
         {
             c_val[base+offset+bi] = a_val[ai]*b_val[b_curr+bi];
@@ -398,20 +469,22 @@ __global__ void binGEMM(
 }
 
 void cudaBinGEMM(cm A, cm B, cm C)
-{    
+{  
+
     for(int i=1;i<NUM_BINS;i++){
         int num_blocks = t_counter[i+1] - t_counter[i];
-        if(num_blocks)
-        binGEMM<<<num_blocks, 128 >>>
-            (a_ptr, a_idx, a_val,
-             b_ptr, b_idx, b_val,
-             c_ptr_base, c_ptr_nnz , c_idx, c_val,
-             &bin[t_counter[i]]);
+        if(num_blocks){
+            binGEMM<<<num_blocks, 32 >>>
+                (a_ptr, a_idx, a_val,
+                 b_ptr, b_idx, b_val,
+                 c_ptr_base, c_ptr_nnz , c_idx, c_val,
+                 &bin[t_counter[i]]);
+        }
+        ERROR_CHECK;
     }
     cudaDeviceSynchronize();
-    ERROR_CHECK;
 }
-
+/*}}}*/
 
 
 
@@ -447,6 +520,8 @@ void cudaSimpleGEMM(cm A, cm B, cm C)
          b_ptr, b_idx, b_val,
          c_ptr_base, c_ptr_nnz , c_idx, c_val);
     cudaDeviceSynchronize();
+    ERROR_CHECK;
+
 }
 /*}}}*/
 __global__ void mergeGEMM(/*{{{*/
@@ -457,15 +532,17 @@ __global__ void mergeGEMM(/*{{{*/
 
     __shared__ int sh_loc;
 
-    for(int r = 0; r <= c_num_rows/gridDim.x + 1 ; r++)
+    for(int r = 0; r <= c_num_rows/gridDim.x  ; r++)
     {
         __syncthreads();
         sh_loc = 0;
         __syncthreads();
         int bid = (blockIdx.x + r*gridDim.x);
+        if(bid >= c_num_rows)
+            return;
         int d_base = (blockIdx.x * c_num_cols);
         int c_base = c_ptr_base[bid];
-
+        
         for(int ci = threadIdx.x ; ci < c_ptr_nnz[bid]; ci+= blockDim.x)
         {
             int col = c_idx_dummy[c_base+ci];
@@ -476,13 +553,16 @@ __global__ void mergeGEMM(/*{{{*/
                 c_idx[c_base + loc] = col;
             }
         }
+        
         __syncthreads();
+        
         for(int ci = threadIdx.x ; ci<sh_loc;ci+= blockDim.x)
         {
             int col = c_idx[c_base + ci];
             c_val[c_base + ci] = dense[d_base + col];
             atomicExch(&dense[d_base+col], 0);
-        } 
+        }
+        
         __syncthreads();
         if(threadIdx.x==0)
             c_ptr_nnz[bid] = sh_loc;
@@ -509,6 +589,7 @@ void cudaMergeGEMM(cm C)
     float* t_val = new float[cmGetNNZ(C)];
     cudaMemcpy(t_ptr_base, c_ptr_base, sizeof(int)*cmGetNumRows(C), cudaMemcpyDeviceToHost);
     cudaMemcpy(t_ptr_nnz, c_ptr_nnz, sizeof(int)*cmGetNumRows(C), cudaMemcpyDeviceToHost);
+    ERROR_CHECK;
 
     int nnzC=0;
     for(int i=0; i<cmGetNumRows(C);i++)
@@ -519,8 +600,8 @@ void cudaMergeGEMM(cm C)
         cudaMemcpy(&t_idx[c_base], &c_idx[c_base], sizeof(int)*c_nnz, cudaMemcpyDeviceToHost);
         cudaMemcpy(&t_val[c_base], &c_val[c_base], sizeof(float)*c_nnz, cudaMemcpyDeviceToHost);
     }
-    ERROR_CHECK;
-
+    printf("%d\n",nnzC);
+    /*
     int nnzCf = 0;
     for(int i=0;i< cmGetNumRows(C);i++)
     {
@@ -532,5 +613,5 @@ void cudaMergeGEMM(cm C)
                 nnzCf++;
         }
     }
-    printf("%d %d\n",nnzC, nnzCf);
+    printf("%d %d\n",nnzC, nnzCf);*/
 }/*}}}*/
